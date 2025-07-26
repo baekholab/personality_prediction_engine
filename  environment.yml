@@ -1,0 +1,25 @@
+name: personality_prediction_engine
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - pyarrow
+  - tqdm
+  - datasets            # Hugging Face loader (if you prefer it)
+  - nltk                # VADER sentiment
+  - spacy               # tokenization
+  - sentence-transformers  # MiniLM embeddings
+  - bertopic            # topic modeling
+  - umap-learn          # for BERTopic dimensionality reduction
+  - hdbscan             # for BERTopic clustering
+  - scikit-learn        # RandomForest, PCA baseline, etc.
+  - optuna              # hyperparameter tuning
+  - shap                # interpretability
+  - flask               # Week 6 demo
+  - streamlit           # Week 6 demo
+  - pip
+  - pip:
+      - tsfresh>=0.21.0  # optional time-series features
