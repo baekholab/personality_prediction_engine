@@ -1,126 +1,211 @@
 #!/usr/bin/env python
 """
-run_pipeline.py
+run_week2.py
 
-Unified Week 1–2 pipeline:
-  1. Load raw CSV of Big-Five-labeled Reddit data
-  2. Clean text, save pandora_cleaned.parquet
-  3. Load cleaned data, extract features (vocab, sentiment, time, topics, embeddings)
-  4. Save pandora_features.parquet
+Week 2: Feature Engineering
+
+Brief:
+This script loads the cleaned Pandora Reddit dataset (Week 1 output),
+computes a comprehensive set of text-based features (vocabulary richness,
+advanced lexical diversity metrics, sentiment scores & volatility,
+style cues, topic clusters, reduced embeddings) and writes out a
+Parquet file ready for modeling.
+
+Outputs:
+- data/pandora_features.parquet
 """
 
-import re
-import numpy as np
-import pandas as pd
-
+import os
 from pathlib import Path
-from datetime import datetime
-from tqdm import tqdm
+import re
+
+import pandas as pd
+import numpy as np
 
 import nltk
-import spacy
-from nltk.sentiment import SentimentIntensityAnalyzer
+from nltk.tokenize import word_tokenize
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+
+from lexicalrichness import LexicalRichness
+import emoji
+
 from sentence_transformers import SentenceTransformer
 from bertopic import BERTopic
+from sklearn.decomposition import PCA
 
-def setup():
-    """Download any required models/data once."""
+# Optional: for progress bars on pandas operations
+from tqdm import tqdm
+
+tqdm.pandas()  # enable `progress_map` / `progress_apply`
+
+
+def ensure_nltk_resources():
+    """
+    Download required NLTK data if it's missing:
+    - 'punkt' and 'punkt_tab' for tokenization
+    - 'vader_lexicon' for sentiment analysis
+    """
+    nltk.download('punkt', quiet=True)
+    nltk.download('punkt_tab', quiet=True)
     nltk.download('vader_lexicon', quiet=True)
-    try:
-        spacy.load("en_core_web_sm")
-    except OSError:
-        spacy.cli.download("en_core_web_sm")
 
-def clean_data(raw_csv: Path, cleaned_parquet: Path):
-    """Load raw CSV, clean text, save parquet."""
-    print(f"1️⃣  Loading raw CSV from {raw_csv}")
-    df = pd.read_csv(raw_csv)
-    print("   Initial shape:", df.shape)
 
-    def is_valid(text):
-        return (
-            isinstance(text, str)
-            and len(text) >= 20
-            and text.lower() not in ['[deleted]', '[removed]']
-        )
-
-    df = df[df['text'].apply(is_valid)].dropna(subset=['created_utc'])
-    df = df.reset_index(drop=True)
-    print("   After cleaning:", df.shape)
-
-    df.to_parquet(cleaned_parquet, index=False)
-    print(f"✅ Cleaned data saved to {cleaned_parquet}")
-
-def feature_engineer(cleaned_parquet: Path, features_parquet: Path):
-    """Load cleaned data, extract features, save parquet."""
-    print(f"2️⃣  Loading cleaned data from {cleaned_parquet}")
-    df = pd.read_parquet(cleaned_parquet)
-    print("   Rows:", len(df))
-
-    tqdm.pandas()
-
-    # Vocabulary richness
-    def vocab_feats(txt):
-        words = re.findall(r'\w+', txt.lower())
-        total = len(words)
-        unique = len(set(words))
-        ttr = unique / total if total else 0
-        avg_len = np.mean([len(w) for w in words]) if words else 0
-        return pd.Series([total, unique, ttr, avg_len])
-
-    df[['word_count','unique_words','ttr','avg_word_len']] = (
-        df['text'].progress_apply(vocab_feats)
+def compute_vocab_features(df, text_col='text'):
+    """
+    Compute vocabulary-based and advanced lexical diversity features:
+      - word_count: total tokens
+      - unique_word_count: distinct tokens
+      - ttr: type-token ratio
+      - avg_word_length: mean token length
+      - mtld: Measure of Textual Lexical Diversity
+      - yule_i: Yule's I lexical burstiness
+    """
+    # Tokenize each document to a list of words
+    df['tokens'] = df[text_col].progress_map(
+        lambda txt: word_tokenize(txt.lower())
     )
 
-    # Sentiment (VADER)
+    # Basic counts
+    df['word_count'] = df['tokens'].map(len)
+    df['unique_word_count'] = df['tokens'].map(lambda toks: len(set(toks)))
+    df['ttr'] = df.apply(
+        lambda row: row['unique_word_count'] / row['word_count']
+        if row['word_count'] > 0 else 0,
+        axis=1
+    )
+    df['avg_word_length'] = df['tokens'].map(
+        lambda toks: np.mean([len(w) for w in toks]) if toks else 0
+    )
+
+    # Advanced lexical diversity
+    def lex_metrics(txt):
+        lr = LexicalRichness(txt)
+        return lr.mtld(), lr.yule_i()
+    lex_df = df[text_col].progress_map(lex_metrics).apply(pd.Series)
+    lex_df.columns = ['mtld','yule_i']
+    df = pd.concat([df, lex_df], axis=1)
+
+    # Drop helper tokens
+    df.drop(columns=['tokens'], inplace=True)
+    return df
+
+
+def compute_sentiment_features(df, text_col='text'):
+    """
+    Compute VADER sentiment scores per comment,
+    then sentiment volatility per user (mean & std. of compound).
+    """
     analyzer = SentimentIntensityAnalyzer()
-    def vader_feats(txt):
-        s = analyzer.polarity_scores(txt)
-        return pd.Series([s['neg'], s['neu'], s['pos'], s['compound']])
+    # per-comment scores
+    scores = df[text_col].progress_map(lambda txt: analyzer.polarity_scores(txt))
+    sent_df = pd.DataFrame(list(scores), index=df.index)
+    sent_df.rename(columns={
+        'neg':'sent_neg','neu':'sent_neu',
+        'pos':'sent_pos','compound':'sent_comp'
+    }, inplace=True)
+    df = pd.concat([df, sent_df], axis=1)
 
-    df[['vader_neg','vader_neu','vader_pos','vader_compound']] = (
-        df['text'].progress_apply(vader_feats)
+    # sentiment volatility (per user)
+    user_col = 'user_id' if 'user_id' in df.columns else 'author' if 'author' in df.columns else None
+    if user_col:
+        agg = df.groupby(user_col)['sent_comp'].agg(['mean','std']).rename(
+            columns={'mean':'sent_comp_mean','std':'sent_comp_std'}
+        )
+        df = df.merge(agg, on=user_col, how='left')
+    return df
+
+
+def compute_style_features(df, text_col='text'):
+    """
+    Extract style cues:
+      - emoji_count
+      - all_caps_ratio
+      - exclamation_count
+      - question_count
+    """
+    # emoji count
+    df['emoji_count'] = df[text_col].progress_map(
+        lambda txt: len(emoji.emoji_list(txt))
     )
-
-    # Posting clock
-    def time_feats(utc):
-        dt = datetime.utcfromtimestamp(utc)
-        return pd.Series([dt.hour, dt.weekday()])
-
-    df[['post_hour','post_weekday']] = (
-        df['created_utc'].progress_apply(time_feats)
+    # all-caps ratio
+    df['all_caps_count'] = df[text_col].progress_map(
+        lambda txt: len(re.findall(r"\b[A-Z]{2,}\b", txt))
     )
+    df['all_caps_ratio'] = df.apply(
+        lambda row: row['all_caps_count'] / row['word_count']
+        if row['word_count']>0 else 0, axis=1
+    )
+    # punctuation counts
+    df['excl_count'] = df[text_col].progress_map(lambda txt: txt.count('!'))
+    df['quest_count'] = df[text_col].progress_map(lambda txt: txt.count('?'))
+    return df
 
-    # Topics & style (optional sampling)
-    docs = df['text'].sample(n=10000, random_state=42).tolist()
-    topic_model = BERTopic()
-    topics, _ = topic_model.fit_transform(docs)
-    topic_df = pd.DataFrame({'text': docs, 'topic': topics})
-    df = df.merge(topic_df, on='text', how='left')
+
+def compute_topic_features(df, text_col='text', sample_size=10_000, seed=42):
+    """
+    Fit BERTopic and assign topic IDs.
+    """
+    sample = df.sample(n=min(sample_size,len(df)), random_state=seed)
+    texts = sample[text_col].tolist()
+    print(f"Fitting BERTopic on {len(texts)} docs...")
+    tm = BERTopic(verbose=False)
+    topics,_ = tm.fit_transform(texts)
+    sample = sample.assign(topic=topics)
+    df = df.merge(sample[['topic']], left_index=True, right_index=True, how='left')
     df['topic'] = df['topic'].fillna(-1).astype(int)
+    return df
 
-    # Dense meaning (MiniLM embeddings)
-    embedder = SentenceTransformer("all-MiniLM-L6-v2")
-    df['embedding'] = df['text'].progress_apply(lambda t: embedder.encode(t))
 
-    # Expand embeddings
-    embs = pd.DataFrame(df['embedding'].tolist(), index=df.index)
-    embs.columns = [f"emb_{i}" for i in range(embs.shape[1])]
-    df = pd.concat([df, embs], axis=1).drop(columns=['embedding'])
+def compute_embedding_features(df, text_col='text', model_name='all-MiniLM-L6-v2'):
+    """
+    Encode texts and reduce embedding dimensions via PCA.
+    """
+    model = SentenceTransformer(model_name)
+    print("Computing embeddings (batch mode)...")
+    embs = model.encode(df[text_col].tolist(), show_progress_bar=True, batch_size=32)
+    # full embedding columns
+    cols = [f'emb_{i}' for i in range(embs.shape[1])]
+    emb_df = pd.DataFrame(embs, index=df.index, columns=cols)
 
-    # Save
-    df.to_parquet(features_parquet, index=False)
-    print(f"✅ Features saved to {features_parquet} ({df.shape[1]} columns)")
+    # PCA reduction
+    pca = PCA(n_components=34, random_state=42)
+    pcs = pca.fit_transform(embs)
+    pc_cols = [f'pca_{i}' for i in range(pcs.shape[1])]
+    pca_df = pd.DataFrame(pcs, index=df.index, columns=pc_cols)
+
+    # concat and drop full embeddings
+    df = pd.concat([df, pca_df], axis=1)
+    return df
+
 
 def main():
-    base = Path(__file__).parent
-    raw_csv = base / "data" / "reddit_bigfive_sample.csv"
-    clean_pq = base / "data" / "pandora_cleaned.parquet"
-    feat_pq  = base / "data" / "pandora_features.parquet"
+    ensure_nltk_resources()
+    root = Path(__file__).parent
+    in_path = root / 'data' / 'pandora_cleaned.parquet'
+    out_path = root / 'data' / 'pandora_features.parquet'
 
-    setup()
-    clean_data(raw_csv, clean_pq)
-    feature_engineer(clean_pq, feat_pq)
+    print(f"Loading data from {in_path}")
+    df = pd.read_parquet(in_path)
 
-if __name__ == "__main__":
+    print("-> Vocabulary features")
+    df = compute_vocab_features(df)
+
+    print("-> Sentiment features & volatility")
+    df = compute_sentiment_features(df)
+
+    print("-> Style features")
+    df = compute_style_features(df)
+
+    print("-> Topic modeling")
+    df = compute_topic_features(df)
+
+    print("-> Embeddings + PCA")
+    df = compute_embedding_features(df)
+
+    os.makedirs(out_path.parent, exist_ok=True)
+    df.to_parquet(out_path, index=False)
+    print(f"Saved features to {out_path} with {df.shape[1]} columns")
+
+
+if __name__ == '__main__':
     main()

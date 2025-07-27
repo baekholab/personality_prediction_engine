@@ -21,5 +21,8 @@ dependencies:
   - flask               # Week 6 demo
   - streamlit           # Week 6 demo
   - pip
+  - lexicalrichness
+  - emoji
+  - scikit-learn        # for PCA
   - pip:
       - tsfresh>=0.21.0  # optional time-series features

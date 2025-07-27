@@ -59,17 +59,15 @@ def merge_shards(shard_paths):
 
 def clean_data(raw_path):
     """
-    Load the merged raw data, filter out:
-      - comments shorter than 10 characters
+    Load merged raw data, filter out:
+      - comments shorter than 10 chars
       - “[deleted]” or “[removed]”
-      - rows missing any Big-Five labels (O, C, E, A, N)
-      - rows missing created_utc
+      - rows missing any of the Big-Five labels: O, C, E, A, N
     Save the cleaned DataFrame as data/pandora_cleaned.parquet.
     """
     print("🧹 Cleaning data…")
     df = pd.read_parquet(raw_path)
 
-    # Keep only comments longer than 10 chars, not deleted/removed
     def valid(text):
         return (
             isinstance(text, str)
@@ -77,10 +75,10 @@ def clean_data(raw_path):
             and text.lower() not in ["[deleted]", "[removed]"]
         )
 
-    # Apply mask and drop rows missing timestamp or any Big-Five label
+    # Apply text filter and drop rows missing trait labels
     df = (
         df[df["text"].apply(valid)]
-          .dropna(subset=["created_utc", "O", "C", "E", "A", "N"])
+          .dropna(subset=["O", "C", "E", "A", "N"])
           .reset_index(drop=True)
     )
 
@@ -88,6 +86,7 @@ def clean_data(raw_path):
     df.to_parquet(clean_path, index=False)
     print(f"✅ Cleaned data → {clean_path} ({len(df):,} rows)")
     return clean_path
+
 
 def main():
     """
