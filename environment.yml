@@ -8,21 +8,22 @@ dependencies:
   - pandas
   - pyarrow
   - tqdm
-  - datasets            # Hugging Face loader (if you prefer it)
+  - datasets            # Hugging Face loader (optional)
   - nltk                # VADER sentiment
   - spacy               # tokenization
   - sentence-transformers  # MiniLM embeddings
   - bertopic            # topic modeling
-  - umap-learn          # for BERTopic dimensionality reduction
+  - umap-learn          # for BERTopic dim-reduction
   - hdbscan             # for BERTopic clustering
-  - scikit-learn        # RandomForest, PCA baseline, etc.
+  - scikit-learn        # RandomForest, PCA, etc.
   - optuna              # hyperparameter tuning
   - shap                # interpretability
   - flask               # Week 6 demo
   - streamlit           # Week 6 demo
+  - flake8              # linting
+  - mypy                # static type checks
   - pip
-  - lexicalrichness
-  - emoji
-  - scikit-learn        # for PCA
   - pip:
-      - tsfresh>=0.21.0  # optional time-series features
+      - lexicalrichness
+      - emoji
+      - tsfresh>=0.21.0      # optional time-series features
