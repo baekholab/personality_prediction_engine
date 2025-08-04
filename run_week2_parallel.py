@@ -2,46 +2,65 @@
 run_week2_parallel.py
 
 Week 2: Feature Engineering (Parallelized)
-This version uses parallel CPU cores and GPU offload where available.
+This version uses parallel CPU cores and GPU offload where available, with memory-optimized settings.
 """
 
-import os
-from pathlib import Path
-import re
+# ──────────────── Standard library imports ────────────────
+import os                    # for creating directories, handling file paths
+from pathlib import Path     # Path objects for filesystem paths
+import re                    # regular expressions for style feature extraction
 
-import pandas as pd
-import numpy as np
+# ──────────────── Third-party imports ────────────────
+import pandas as pd          # DataFrame operations & I/O
+import numpy as np           # numerical computations on arrays
 
-import nltk
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import nltk                  # Natural Language Toolkit
+from nltk.sentiment.vader import SentimentIntensityAnalyzer  
+                             # VADER sentiment analyzer
 
-import spacy
-from spacy.cli import download as spacy_download
-from joblib import Parallel, delayed
+import spacy                 # spaCy NLP library
+from spacy.cli import download as spacy_download  
+                             # helper to download spaCy models
 
-from lexicalrichness import LexicalRichness
-import emoji
+from joblib import Parallel, delayed  
+                             # easy parallel loops across CPU cores
 
-from sentence_transformers import SentenceTransformer
-from bertopic import BERTopic
-from umap import UMAP
-from hdbscan import HDBSCAN
+from lexicalrichness import LexicalRichness  
+                             # computes MTLD lexical diversity metric
 
-from sklearn.decomposition import PCA
-from tqdm import tqdm
+import emoji                 # extract & count emojis in text
 
-tqdm.pandas()
+from sentence_transformers import SentenceTransformer  
+                             # transformer embeddings
+from bertopic import BERTopic  
+                             # topic modeling framework
 
+from umap import UMAP        # dimensionality reduction for clustering
+from hdbscan import HDBSCAN  # density-based clusterer
+
+from sklearn.decomposition import PCA  
+                             # principal component analysis
+
+from tqdm import tqdm        # progress bars
+tqdm.pandas()                # integrate tqdm with pandas apply/progress_map
+
+
+# ──────────────── Utility functions ────────────────
 
 def ensure_nltk_resources():
-    """ Download punkt & vader_lexicon """
+    """
+    Download any missing NLTK data quietly:
+      - 'punkt' tokenizer for splitting text into tokens
+      - 'vader_lexicon' needed by VADER sentiment
+    """
     nltk.download('punkt', quiet=True)
     nltk.download('vader_lexicon', quiet=True)
 
 
 def ensure_spacy_model(model_name="en_core_web_sm"):
     """
-    Ensure the specified spaCy model is installed. If not, download it.
+    Check if a spaCy model is installed by attempting to load.
+    If not found, download it on the fly.
     """
     try:
         spacy.load(model_name)
@@ -50,17 +69,21 @@ def ensure_spacy_model(model_name="en_core_web_sm"):
         spacy_download(model_name)
 
 
-def compute_vocab_features(df, text_col='text', n_process=4):
-    """ Tokenize with spaCy and compute lexical diversity features. """
+# ──────────────── Feature-engineering functions ────────────────
+
+def compute_vocab_features(df, text_col='text', n_process=2):
+    """
+    Parallel spaCy tokenization & lexical features with reduced processes to save memory.
+    """
     nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
     texts = df[text_col].tolist()
-    docs = list(nlp.pipe(texts, n_process=n_process, batch_size=1000))
+    docs = list(nlp.pipe(texts, n_process=n_process, batch_size=500))
     df['tokens'] = [[tok.text.lower() for tok in doc] for doc in docs]
 
     df['word_count'] = df['tokens'].map(len)
     df['unique_word_count'] = df['tokens'].map(lambda toks: len(set(toks)))
     df['ttr'] = df.apply(
-        lambda r: r['unique_word_count'] / r['word_count'] if r['word_count'] > 0 else 0,
+        lambda row: row['unique_word_count'] / row['word_count'] if row['word_count'] > 0 else 0,
         axis=1
     )
     df['avg_word_length'] = df['tokens'].map(
@@ -81,31 +104,34 @@ def compute_vocab_features(df, text_col='text', n_process=4):
     return df
 
 
-def compute_sentiment_features(df, text_col='text', n_jobs=4):
+def compute_sentiment_features(df, text_col='text', n_jobs=2):
+    """
+    Parallel VADER sentiment scoring with reduced jobs.
+    """
     analyzer = SentimentIntensityAnalyzer()
     texts = df[text_col].tolist()
+
     scores = Parallel(n_jobs=n_jobs)(
         delayed(analyzer.polarity_scores)(txt) for txt in texts
     )
     sent_df = pd.DataFrame(scores, index=df.index).rename(columns={
-        'neg': 'sent_neg',
-        'neu': 'sent_neu',
-        'pos': 'sent_pos',
-        'compound': 'sent_comp'
+        'neg': 'sent_neg', 'neu': 'sent_neu', 'pos': 'sent_pos', 'compound': 'sent_comp'
     })
     df = pd.concat([df, sent_df], axis=1)
 
     user_col = next((c for c in ['user_id', 'author', 'username'] if c in df.columns), None)
     if user_col:
         agg = df.groupby(user_col)['sent_comp'].agg(['mean', 'std']).rename(columns={
-            'mean': 'sent_comp_mean',
-            'std': 'sent_comp_std'
+            'mean': 'sent_comp_mean', 'std': 'sent_comp_std'
         })
         df = df.merge(agg, on=user_col, how='left')
     return df
 
 
 def compute_style_features(df, text_col='text'):
+    """
+    Lightweight stylistic features (no parallelism needed).
+    """
     df['emoji_count'] = df[text_col].map(lambda txt: len(emoji.emoji_list(txt)))
     df['all_caps_count'] = df[text_col].map(
         lambda txt: len(re.findall(r"\b[A-Z]{2,}\b", txt))
@@ -113,18 +139,21 @@ def compute_style_features(df, text_col='text'):
     df['excl_count'] = df[text_col].map(lambda txt: txt.count('!'))
     df['quest_count'] = df[text_col].map(lambda txt: txt.count('?'))
     df['all_caps_ratio'] = df.apply(
-        lambda r: r['all_caps_count'] / r['word_count'] if r['word_count'] > 0 else 0,
+        lambda row: row['all_caps_count'] / row['word_count'] if row['word_count'] > 0 else 0,
         axis=1
     )
     return df
 
 
-def compute_topic_features(df, text_col='text', sample_size=10000, seed=42):
+def compute_topic_features(df, text_col='text', sample_size=5000, seed=42):
+    """
+    Topic modeling with reduced sample size and parallel UMAP/HDBSCAN.
+    """
     sample = df.sample(n=min(sample_size, len(df)), random_state=seed)
     texts = sample[text_col].tolist()
 
-    umap_model = UMAP(n_neighbors=15, n_components=5, n_jobs=4)
-    hdbscan_model = HDBSCAN(core_dist_n_jobs=4)
+    umap_model = UMAP(n_neighbors=15, n_components=5, n_jobs=2)
+    hdbscan_model = HDBSCAN(core_dist_n_jobs=2)
     tm = BERTopic(umap_model=umap_model, hdbscan_model=hdbscan_model, verbose=False)
 
     topics, _ = tm.fit_transform(texts)
@@ -134,9 +163,19 @@ def compute_topic_features(df, text_col='text', sample_size=10000, seed=42):
     return df
 
 
-def compute_embedding_features(df, text_col='text', model_name='all-MiniLM-L6-v2', batch_size=64):
+def compute_embedding_features(df, text_col='text', model_name='all-MiniLM-L6-v2', batch_size=16):
+    """
+    Chunked GPU embeddings + PCA to limit peak memory usage.
+    """
     model = SentenceTransformer(model_name, device='cuda')
-    embs = model.encode(df[text_col].tolist(), show_progress_bar=True, batch_size=batch_size)
+    texts = df[text_col].tolist()
+    all_embs = []
+    for i in range(0, len(texts), batch_size):
+        chunk = texts[i:i+batch_size]
+        embs = model.encode(chunk, show_progress_bar=False, batch_size=batch_size)
+        all_embs.append(embs)
+    embs = np.vstack(all_embs)
+
     pca = PCA(n_components=34, random_state=42)
     pcs = pca.fit_transform(embs)
     pc_cols = [f'pca_{i}' for i in range(pcs.shape[1])]
@@ -145,15 +184,18 @@ def compute_embedding_features(df, text_col='text', model_name='all-MiniLM-L6-v2
 
 
 def aggregate_user_mtld(df):
+    """
+    Aggregate comment-level MTLD to user-level mean & std.
+    """
     user_col = next((c for c in ['user_id', 'author', 'username'] if c in df.columns), None)
     if user_col:
         um = df.groupby(user_col)['mtld'].agg(['mean', 'std']).rename(columns={
-            'mean': 'mtld_mean',
-            'std': 'mtld_std'
+            'mean': 'mtld_mean', 'std': 'mtld_std'
         })
         df = df.merge(um, on=user_col, how='left')
     return df
 
+# ──────────────── Main execution ────────────────
 
 def main():
     ensure_nltk_resources()
@@ -162,18 +204,17 @@ def main():
     root = Path(__file__).parent
     df = pd.read_parquet(root / 'data' / 'pandora_cleaned.parquet')
 
-    df = compute_vocab_features(df, n_process=4)
-    df = compute_sentiment_features(df, n_jobs=4)
+    df = compute_vocab_features(df, n_process=2)
+    df = compute_sentiment_features(df, n_jobs=2)
     df = compute_style_features(df)
-    df = compute_topic_features(df)
-    df = compute_embedding_features(df)
+    df = compute_topic_features(df, sample_size=5000)
+    df = compute_embedding_features(df, batch_size=16)
     df = aggregate_user_mtld(df)
 
     out_path = root / 'data' / 'pandora_user_features.parquet'
     os.makedirs(out_path.parent, exist_ok=True)
     df.to_parquet(out_path, index=False)
     print(f"Saved features to {out_path} with {df.shape[1]} columns")
-
 
 if __name__ == '__main__':
     main()
