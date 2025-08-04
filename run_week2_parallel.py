@@ -55,51 +55,34 @@ def compute_vocab_features(df, text_col='text', n_process=4):
     """
     Tokenize and compute lexical diversity features in parallel.
 
-    Parameters:
-      df (pd.DataFrame): Input DataFrame containing a text column.
-      text_col (str): Name of the column with raw text.
-      n_process (int): Number of CPU processes for spaCy tokenization.
-
-    Returns:
-      pd.DataFrame: Original df with additional columns:
-        - word_count: number of tokens per comment
-        - unique_word_count: distinct tokens per comment
-        - ttr: type-token ratio (unique/total)
-        - avg_word_length: mean length of tokens
-        - mtld: Measure of Textual Lexical Diversity
+    Returns df with new columns: word_count, unique_word_count, ttr,
+    avg_word_length, mtld.
     """
-    # Load spaCy model optimized for tokenization only
     nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
-    texts = df[text_col].tolist()  # extract all comment texts
-    # Parallel processing: divide texts across n_process workers
+    texts = df[text_col].tolist()
     docs = list(nlp.pipe(texts, n_process=n_process, batch_size=1000))
-    # Extract lowercase token lists from spaCy Doc objects
     df['tokens'] = [[tok.text.lower() for tok in doc] for doc in docs]
 
-    # Basic lexical features
     df['word_count'] = df['tokens'].map(len)
     df['unique_word_count'] = df['tokens'].map(lambda toks: len(set(toks)))
-    # Type-Token Ratio for lexical diversity
     df['ttr'] = df.apply(
         lambda r: r['unique_word_count'] / r['word_count'] if r['word_count'] > 0 else 0,
         axis=1
     )
-    # Average token length in each comment
     df['avg_word_length'] = df['tokens'].map(
         lambda toks: np.mean([len(w) for w in toks]) if toks else 0
     )
 
-    # MTLD calculation can be expensive; parallelize with Joblib
     def mtld_metric(txt):
         try:
             return LexicalRichness(txt).mtld()
         except ZeroDivisionError:
             return 0.0
+
     df['mtld'] = Parallel(n_jobs=n_process)(
         delayed(mtld_metric)(txt) for txt in df[text_col]
     )
 
-    # Drop intermediate token column to save memory
     df.drop(columns=['tokens'], inplace=True)
     return df
 
@@ -107,56 +90,35 @@ def compute_vocab_features(df, text_col='text', n_process=4):
 def compute_sentiment_features(df, text_col='text', n_jobs=4):
     """
     Compute VADER sentiment scores per comment and user-level volatility.
-
-    Parameters:
-      df (pd.DataFrame): Input DataFrame containing a text column.
-      text_col (str): Name of the column with raw text.
-      n_jobs (int): Number of parallel jobs for sentiment scoring.
-
-    Returns:
-      pd.DataFrame: Original df with added columns:
-        - sent_neg, sent_neu, sent_pos, sent_comp: VADER scores per comment
-        - sent_comp_mean, sent_comp_std: mean and std of compound score per user
+    Adds sent_neg, sent_neu, sent_pos, sent_comp, sent_comp_mean, sent_comp_std.
     """
-    analyzer = SentimentIntensityAnalyzer()  # initialize VADER
+    analyzer = SentimentIntensityAnalyzer()
     texts = df[text_col].tolist()
-    # Parallelize sentiment analysis across n_jobs CPU cores
     scores = Parallel(n_jobs=n_jobs)(
         delayed(analyzer.polarity_scores)(txt) for txt in texts
     )
-    sent_df = pd.DataFrame(scores, index=df.index)
-    sent_df.rename(columns={
+    sent_df = pd.DataFrame(scores, index=df.index).rename(columns={
         'neg': 'sent_neg',
         'neu': 'sent_neu',
         'pos': 'sent_pos',
         'compound': 'sent_comp'
-    }, inplace=True)
+    })
     df = pd.concat([df, sent_df], axis=1)
 
-    # Identify user ID column and compute volatility of sentiment
     user_col = next((c for c in ['user_id', 'author', 'username'] if c in df.columns), None)
     if user_col:
-        agg = df.groupby(user_col)['sent_comp'].agg(['mean', 'std'])
-        agg.rename(columns={'mean': 'sent_comp_mean', 'std': 'sent_comp_std'}, inplace=True)
+        agg = df.groupby(user_col)['sent_comp'].agg(['mean', 'std']).rename(columns={
+            'mean': 'sent_comp_mean',
+            'std': 'sent_comp_std'
+        })
         df = df.merge(agg, on=user_col, how='left')
     return df
 
 
 def compute_style_features(df, text_col='text'):
     """
-    Extract stylistic features such as emoji usage, all-caps words, and punctuation.
-
-    Parameters:
-      df (pd.DataFrame): Input DataFrame.
-      text_col (str): Column name containing comment text.
-
-    Returns:
-      pd.DataFrame: df with added columns:
-        - emoji_count: count of emojis in text
-        - all_caps_count: number of words in ALL CAPS
-        - excl_count: count of exclamation marks '!'
-        - quest_count: count of question marks '?'
-        - all_caps_ratio: ratio of all_caps_count to total words
+    Extract stylistic features: emoji_count, all_caps_count,
+    excl_count, quest_count, all_caps_ratio.
     """
     df['emoji_count'] = df[text_col].map(lambda txt: len(emoji.emoji_list(txt)))
     df['all_caps_count'] = df[text_col].map(
@@ -173,22 +135,7 @@ def compute_style_features(df, text_col='text'):
 
 def compute_topic_features(df, text_col='text', sample_size=10000, seed=42):
     """
-    Perform topic modeling using BERTopic on a sample and apply to all data.
-
-    Steps:
-      1. Randomly sample up to sample_size documents for faster fitting.
-      2. Configure UMAP and HDBSCAN with n_jobs for parallel embeddings/clustering.
-      3. Fit BERTopic on sample and assign cluster labels.
-      4. Merge sample topics back into full DataFrame, filling missing with -1.
-
-    Parameters:
-      df (pd.DataFrame): Input DataFrame.
-      text_col (str): Column name with comment text.
-      sample_size (int): Max number of docs to sample for training.
-      seed (int): Random seed for reproducibility.
-
-    Returns:
-      pd.DataFrame: df with a new 'topic' integer column per comment.
+    Perform BERTopic modeling on a sample and assign topic labels to all.
     """
     sample = df.sample(n=min(sample_size, len(df)), random_state=seed)
     texts = sample[text_col].tolist()
@@ -206,28 +153,10 @@ def compute_topic_features(df, text_col='text', sample_size=10000, seed=42):
 
 def compute_embedding_features(df, text_col='text', model_name='all-MiniLM-L6-v2', batch_size=64):
     """
-    Generate dense semantic embeddings and reduce dimensions.
-
-    Steps:
-      1. Load SentenceTransformer model onto GPU (
-         device='cuda') for fast encoding.
-      2. Encode all texts in batches to utilize GPU cores.
-      3. Apply PCA on CPU to reduce embedding size to 34 components.
-      4. Append PCA scores as new 'pca_*' columns.
-
-    Parameters:
-      df (pd.DataFrame): Input DataFrame.
-      text_col (str): Column with comment text.
-      model_name (str): Pretrained model identifier.
-      batch_size (int): Number of docs per GPU batch.
-
-    Returns:
-      pd.DataFrame: df with appended PCA-reduced embedding features.
+    Generate transformer embeddings on GPU and reduce to 34 PCA components.
     """
     model = SentenceTransformer(model_name, device='cuda')
-    embs = model.encode(
-        df[text_col].tolist(), show_progress_bar=True, batch_size=batch_size
-    )
+    embs = model.encode(df[text_col].tolist(), show_progress_bar=True, batch_size=batch_size)
     pca = PCA(n_components=34, random_state=42)
     pcs = pca.fit_transform(embs)
     pc_cols = [f'pca_{i}' for i in range(pcs.shape[1])]
@@ -237,33 +166,24 @@ def compute_embedding_features(df, text_col='text', model_name='all-MiniLM-L6-v2
 
 def aggregate_user_mtld(df):
     """
-    Aggregate comment-level MTLD to user-level statistics.
-
-    Computes mean and standard deviation of MTLD per user to capture
-    variability in lexical diversity across comments.
-
-    Parameters:
-      df (pd.DataFrame): DataFrame with 'mtld' and user ID columns.
-
-    Returns:
-      pd.DataFrame: df with new columns 'mtld_mean' and 'mtld_std'.
+    Aggregate comment-level MTLD to user-level stats: mtld_mean, mtld_std.
     """
     user_col = next((c for c in ['user_id', 'author', 'username'] if c in df.columns), None)
     if user_col:
-        um = df.groupby(user_col)['mtld'].agg(['mean', 'std'])
-        um.rename(columns={'mean': 'mtld_mean', 'std': 'mtld_std'}, inplace=True)
+        um = df.groupby(user_col)['mtld'].agg(['mean', 'std']).rename(columns={
+            'mean': 'mtld_mean',
+            'std': 'mtld_std'
+        })
         df = df.merge(um, on=user_col, how='left')
     return df
 
 
 def main():
     """
-    Main execution flow:
-      1. Ensure necessary NLTK data is available.
-      2. Load cleaned Week 1 data from Parquet.
-      3. Sequentially apply each compute_* function, which handle
-         their own parallelism and device placement.
-      4. Save the fully-featured DataFrame to Parquet for modeling.
+    1) Download NLTK data
+    2) Load cleaned data
+    3) Run all feature functions
+    4) Write out a Parquet of features
     """
     ensure_nltk_resources()
     root = Path(__file__).parent
@@ -281,6 +201,6 @@ def main():
     df.to_parquet(out_path, index=False)
     print(f"Saved features to {out_path} with {df.shape[1]} columns")
 
+
 if __name__ == '__main__':
     main()
-```
