@@ -1,5 +1,3 @@
-```python
-#!/usr/bin/env python
 """
 run_week2_parallel.py
 
