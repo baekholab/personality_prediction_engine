@@ -5,59 +5,53 @@ Week 2: Feature Engineering (Parallelized)
 This version uses parallel CPU cores and GPU offload where available.
 """
 
-import os  # filesystem operations (making directories, handling paths)
-from pathlib import Path  # object-oriented filesystem paths
-import re  # regex operations for style feature extraction
+import os
+from pathlib import Path
+import re
 
-import pandas as pd  # DataFrame operations and I/O
-import numpy as np  # numerical computations
+import pandas as pd
+import numpy as np
 
-import nltk  # natural language toolkit for downloads and tokenizers
-from nltk.sentiment.vader import SentimentIntensityAnalyzer  # VADER sentiment analysis
+import nltk
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-# Parallel processing libraries
-import spacy  # fast NLP pipeline with multi-process support
-from joblib import Parallel, delayed  # easy parallel loops for Python
+import spacy
+from spacy.cli import download as spacy_download
+from joblib import Parallel, delayed
 
-# Lexical richness metric
-from lexicalrichness import LexicalRichness  # computes MTLD diversity metric
-# Unicode emoji support
-import emoji  # extract and count emojis
+from lexicalrichness import LexicalRichness
+import emoji
 
-# Topic modeling and transformer embeddings
-from sentence_transformers import SentenceTransformer  # transformer-based embeddings
-from bertopic import BERTopic  # topic modeling framework
-# UMAP + HDBSCAN for efficient, parallelizable clustering
+from sentence_transformers import SentenceTransformer
+from bertopic import BERTopic
 from umap import UMAP
 from hdbscan import HDBSCAN
 
-# Dimensionality reduction for embeddings
 from sklearn.decomposition import PCA
-
-# Optional progress bars for pandas operations
 from tqdm import tqdm
 
-tqdm.pandas()  # enable df['col'].progress_map() with tqdm
+tqdm.pandas()
 
 
 def ensure_nltk_resources():
-    """
-    Download NLTK resources needed for this script if missing:
-      - 'punkt' tokenizer data for splitting text into tokens
-      - 'vader_lexicon' for sentiment scoring via VADER
-    This runs silently (quiet=True) to avoid cluttering output.
-    """
+    """ Download punkt & vader_lexicon """
     nltk.download('punkt', quiet=True)
     nltk.download('vader_lexicon', quiet=True)
 
 
-def compute_vocab_features(df, text_col='text', n_process=4):
+def ensure_spacy_model(model_name="en_core_web_sm"):
     """
-    Tokenize and compute lexical diversity features in parallel.
+    Ensure the specified spaCy model is installed. If not, download it.
+    """
+    try:
+        spacy.load(model_name)
+    except OSError:
+        print(f"Model '{model_name}' not found—downloading now...")
+        spacy_download(model_name)
 
-    Returns df with new columns: word_count, unique_word_count, ttr,
-    avg_word_length, mtld.
-    """
+
+def compute_vocab_features(df, text_col='text', n_process=4):
+    """ Tokenize with spaCy and compute lexical diversity features. """
     nlp = spacy.load("en_core_web_sm", disable=["parser", "ner"])
     texts = df[text_col].tolist()
     docs = list(nlp.pipe(texts, n_process=n_process, batch_size=1000))
@@ -88,10 +82,6 @@ def compute_vocab_features(df, text_col='text', n_process=4):
 
 
 def compute_sentiment_features(df, text_col='text', n_jobs=4):
-    """
-    Compute VADER sentiment scores per comment and user-level volatility.
-    Adds sent_neg, sent_neu, sent_pos, sent_comp, sent_comp_mean, sent_comp_std.
-    """
     analyzer = SentimentIntensityAnalyzer()
     texts = df[text_col].tolist()
     scores = Parallel(n_jobs=n_jobs)(
@@ -116,10 +106,6 @@ def compute_sentiment_features(df, text_col='text', n_jobs=4):
 
 
 def compute_style_features(df, text_col='text'):
-    """
-    Extract stylistic features: emoji_count, all_caps_count,
-    excl_count, quest_count, all_caps_ratio.
-    """
     df['emoji_count'] = df[text_col].map(lambda txt: len(emoji.emoji_list(txt)))
     df['all_caps_count'] = df[text_col].map(
         lambda txt: len(re.findall(r"\b[A-Z]{2,}\b", txt))
@@ -134,9 +120,6 @@ def compute_style_features(df, text_col='text'):
 
 
 def compute_topic_features(df, text_col='text', sample_size=10000, seed=42):
-    """
-    Perform BERTopic modeling on a sample and assign topic labels to all.
-    """
     sample = df.sample(n=min(sample_size, len(df)), random_state=seed)
     texts = sample[text_col].tolist()
 
@@ -152,9 +135,6 @@ def compute_topic_features(df, text_col='text', sample_size=10000, seed=42):
 
 
 def compute_embedding_features(df, text_col='text', model_name='all-MiniLM-L6-v2', batch_size=64):
-    """
-    Generate transformer embeddings on GPU and reduce to 34 PCA components.
-    """
     model = SentenceTransformer(model_name, device='cuda')
     embs = model.encode(df[text_col].tolist(), show_progress_bar=True, batch_size=batch_size)
     pca = PCA(n_components=34, random_state=42)
@@ -165,9 +145,6 @@ def compute_embedding_features(df, text_col='text', model_name='all-MiniLM-L6-v2
 
 
 def aggregate_user_mtld(df):
-    """
-    Aggregate comment-level MTLD to user-level stats: mtld_mean, mtld_std.
-    """
     user_col = next((c for c in ['user_id', 'author', 'username'] if c in df.columns), None)
     if user_col:
         um = df.groupby(user_col)['mtld'].agg(['mean', 'std']).rename(columns={
@@ -179,13 +156,9 @@ def aggregate_user_mtld(df):
 
 
 def main():
-    """
-    1) Download NLTK data
-    2) Load cleaned data
-    3) Run all feature functions
-    4) Write out a Parquet of features
-    """
     ensure_nltk_resources()
+    ensure_spacy_model("en_core_web_sm")
+
     root = Path(__file__).parent
     df = pd.read_parquet(root / 'data' / 'pandora_cleaned.parquet')
 
