@@ -1,29 +1,41 @@
 name: personality_prediction_engine
 channels:
+  - pytorch          # for GPU PyTorch
+  - nvidia           # for pytorch-cuda meta-package
   - conda-forge
   - defaults
 dependencies:
   - python=3.10
+  # --- Core numeric / IO ---
   - numpy
   - pandas
   - pyarrow
   - tqdm
-  - datasets            # Hugging Face loader (optional)
-  - nltk                # VADER sentiment
-  - spacy               # tokenization
-  - sentence-transformers  # MiniLM embeddings
-  - bertopic            # topic modeling
-  - umap-learn          # for BERTopic dim-reduction
-  - hdbscan             # for BERTopic clustering
-  - scikit-learn        # RandomForest, PCA, etc.
-  - optuna              # hyperparameter tuning
-  - shap                # interpretability
-  - flask               # Week 6 demo
-  - streamlit           # Week 6 demo
-  - flake8              # linting
-  - mypy                # static type checks
+  - scikit-learn
+  - joblib
+  # --- NLP / ML stack ---
+  - nltk
+  - spacy
+  - umap-learn
+  - hdbscan
+  - bertopic
+  - sentence-transformers
+  - transformers            # explicit; pulled by sentence-transformers but good to pin
+  # --- GPU PyTorch (CU 11.8) ---
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.8       # ensures the CUDA runtime is present in the env (Linux)
+  # --- Dev / App extras ---
+  - datasets                # Hugging Face (optional but handy)
+  - optuna                  # tuning
+  - shap                    # interpretation
+  - flask                   # Week 6 demo
+  - streamlit               # Week 6 demo
+  - flake8                  # lint
+  - mypy                    # typing
   - pip
   - pip:
       - lexicalrichness
       - emoji
-      - tsfresh>=0.21.0      # optional time-series features
+      - tsfresh>=0.21.0     # optional: time-series features
