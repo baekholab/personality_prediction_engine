@@ -112,6 +112,15 @@ def parse_args():
                    help="Where to write the manifest (default: ./logs).")
     p.add_argument("--artifacts-dir", type=str, default=None,
                    help="Where to save PCA/BERTopic (default: ./models).")
+
+    # (NEW) Embedding persistence knobs to avoid disk OOMs
+    p.add_argument("--save-embeddings", choices=["none", "fp16", "fp32", "sharded"],
+                   default="none",
+                   help="How to persist embeddings to disk. 'none' = skip saving; "
+                        "'fp16' ≈ half the size; 'fp32' = full precision; "
+                        "'sharded' = multiple fp16 .npy files to keep each file smaller.")
+    p.add_argument("--shard-rows", type=int, default=250_000,
+                   help="Rows per shard when --save-embeddings=sharded (smaller → more files, less per-file size).")
     return p.parse_args()
 
 
@@ -434,10 +443,41 @@ def main():
             model_name=args.model_name
         )
 
-    # Save embeddings to disk so Week 3 can reuse them without recomputing
-    emb_path = data_dir / 'embeddings_fp32.npy'
-    np.save(emb_path, embs)
-    print(f"[Artifacts] Saved embeddings to {emb_path}", flush=True)
+    # ── (NEW) Persist embeddings with size-aware options to avoid disk OOMs ──
+    # We let you choose how (or whether) to save the big embeddings array.
+    # emb_artifacts will be recorded in the manifest:
+    #   - a string path (single file), or
+    #   - a list of shard paths, or
+    #   - None if we skipped saving.
+    emb_artifacts = None
+
+    if args.save_embeddings == "fp16":
+        emb_path = data_dir / "embeddings_fp16.npy"
+        np.save(emb_path, embs.astype(np.float16))  # half the bytes vs fp32 (2 bytes/float)
+        emb_artifacts = str(emb_path)
+        print(f"[Artifacts] Saved fp16 embeddings to {emb_path}", flush=True)
+
+    elif args.save_embeddings == "fp32":
+        emb_path = data_dir / "embeddings_fp32.npy"
+        np.save(emb_path, embs)  # full precision (4 bytes/float)
+        emb_artifacts = str(emb_path)
+        print(f"[Artifacts] Saved fp32 embeddings to {emb_path}", flush=True)
+
+    elif args.save_embeddings == "sharded":
+        # Save multiple smaller files so each file is manageable in size.
+        # We write fp16 shards named like: embeddings_fp16_part_000000000.npy
+        shards = []
+        n = embs.shape[0]
+        for start in range(0, n, args.shard_rows):
+            end = min(start + args.shard_rows, n)
+            shard_path = data_dir / f"embeddings_fp16_part_{start:09d}.npy"
+            np.save(shard_path, embs[start:end].astype(np.float16))
+            shards.append(str(shard_path))
+        emb_artifacts = shards
+        print(f"[Artifacts] Saved {len(shards)} fp16 shards to {data_dir}", flush=True)
+
+    else:  # "none" → safest when disk space is tight
+        print("[Artifacts] Skipping embedding save (--save-embeddings=none)", flush=True)
 
     # 5) Topics (fit on a sample for efficiency, transform all with precomputed embs)
     with timed("BERTopic (fit sample + transform all) [precomputed embs]"):
@@ -490,7 +530,8 @@ def main():
     manifest = {
         "in_path": str(in_path),
         "out_path": str(out_path),
-        "embeddings_path": str(emb_path),
+        # (NEW) This can be a string (single file), a list (shards), or None (skipped)
+        "embeddings_path": emb_artifacts,
         "pca_path": str(pca_path),
         "bertopic_dir": str(bertopic_dir),
         "rows": int(df.shape[0]),
@@ -501,7 +542,10 @@ def main():
             "model_name": args.model_name,
             "n_process": args.n_process,
             "n_jobs": args.n_jobs,
-            "seed": SEED
+            "seed": SEED,
+            # (NEW) record how we chose to persist embeddings
+            "save_embeddings": args.save_embeddings,
+            "shard_rows": args.shard_rows,
         },
         "env": {
             "python": platform.python_version(),
